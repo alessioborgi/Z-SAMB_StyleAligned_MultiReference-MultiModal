@@ -717,18 +717,18 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
 # -----------------------------------------------------------------------------
 def extract_features(decoded_image):
     """
-    Extract content features from a decoded image using a pretrained CLIP model.
+    Extract content features from a decoded image using a pretrained CLIP model,
+    running the CLIP encoder on CPU to reduce GPU memory usage.
     
     Args:
         decoded_image: A torch.Tensor of shape (B, C, H, W) with pixel values in [0, 1],
                        or a DecoderOutput with a 'sample' attribute.
     
     Returns:
-        The CLIP image features.
+        The CLIP image features (on CPU).
     """
     import clip
-    device = None
-    # If decoded_image is not a tensor, try to extract the underlying tensor.
+    # Ensure decoded_image is a tensor. If not, try to extract it.
     if not isinstance(decoded_image, torch.Tensor):
         if hasattr(decoded_image, 'sample'):
             decoded_image = decoded_image.sample
@@ -736,21 +736,30 @@ def extract_features(decoded_image):
             decoded_image = decoded_image['sample']
         else:
             raise ValueError("Decoded image is not a tensor and cannot be processed.")
-    device = decoded_image.device
-
+    
+    # Force CLIP processing on CPU.
+    device_cpu = torch.device("cpu")
+    
     global clip_model
     if 'clip_model' not in globals():
-        clip_model, _ = clip.load("ViT-B/32", device=device)
+        clip_model, _ = clip.load("ViT-B/32", device=device_cpu, jit=False)
         clip_model.eval()
-    # Resize image to 224x224 required by CLIP.
-    resized = torch.nn.functional.interpolate(decoded_image, size=(224, 224), mode='bilinear', align_corners=False)
+    
+    # Move decoded image to CPU.
+    decoded_cpu = decoded_image.to(device_cpu)
+    
+    # Resize to 224x224 required by CLIP.
+    resized = torch.nn.functional.interpolate(decoded_cpu, size=(224, 224), mode='bilinear', align_corners=False)
+    
     # Normalize using CLIP's mean and std.
-    mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device).view(1, 3, 1, 1)
-    std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device).view(1, 3, 1, 1)
+    mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device_cpu).view(1, 3, 1, 1)
+    std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device_cpu).view(1, 3, 1, 1)
     normed = (resized - mean) / std
+    
     with torch.no_grad():
         features = clip_model.encode_image(normed)
     return features
+
 
 # -----------------------------------------------------------------------------
 # Advanced Multi-Style Reference Blending (REBIGRAM++)
