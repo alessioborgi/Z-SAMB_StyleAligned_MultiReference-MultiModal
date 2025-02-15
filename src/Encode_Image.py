@@ -228,80 +228,36 @@ def images_encoding_slerp(model, images: list[np.ndarray], blending_weights: lis
 
 
 
-############ MULTI-STYLE REFERENCE: WEIGHTED RBI (RIEMANNIAN BARYCENTER INTERPOLATION) (FRECHET MEAN INTERPOLATION)###
-import torch
-import numpy as np
+# ############ MULTI-STYLE REFERENCE: WEIGHTED EUCLIDEAN BARYCENTER INTERPOLATION(FRECHET MEAN IN R^n) ###
 
-# Helper functions for the spherical (Riemannian) operations
-
-def compute_log_map(m, X):
+def euclidean_barycenter(valid_latents, weights):
     """
-    Compute the logarithmic map at base point m for each point in X.
-    Args:
-        m: Tensor of shape (1, d) representing the base point (normalized).
-        X: Tensor of shape (n, d) representing n points (each normalized).
-    Returns:
-        Tensor of shape (n, d) containing the tangent vectors.
-    """
-    # Dot product between m and each row in X
-    dot = torch.matmul(X, m.t())  # shape: (n, 1)
-    # Clamp to ensure numerical stability
-    dot = torch.clamp(dot, -1.0, 1.0)
-    theta = torch.acos(dot)  # angular distance, shape: (n, 1)
-    sin_theta = torch.sin(theta)
-    # Avoid division by zero
-    factor = theta / (sin_theta + 1e-8)
-    return factor * (X - dot * m)
-
-def exp_map(m, v):
-    """
-    Compute the exponential map at base point m for a tangent vector v.
-    Args:
-        m: Tensor of shape (1, d) representing the base point.
-        v: Tensor of shape (1, d) tangent vector at m.
-    Returns:
-        Tensor of shape (1, d) representing the mapped point on the sphere.
-    """
-    norm_v = torch.norm(v, dim=1, keepdim=True)
-    return torch.cos(norm_v) * m + torch.sin(norm_v) * (v / (norm_v + 1e-8))
-
-def riemannian_barycenter(valid_latents, weights, num_iterations=100, tol=1e-6):
-    """
-    Compute the weighted Riemannian barycenter (Fréchet mean) of latent vectors.
+    Compute the weighted Euclidean barycenter of latent vectors.
+    
     Args:
         valid_latents: List of torch tensors of latent representations.
-                       Each tensor is assumed to have shape (1, C, H, W).
+                       Each tensor has shape (1, C, H, W).
         weights: 1D tensor of blending weights (summing to 1) for each latent.
-        num_iterations: Maximum number of iterations for convergence.
-        tol: Tolerance for the norm of the update vector.
     Returns:
         The blended latent representation, reshaped to the original latent shape.
     """
     # Flatten each latent into a vector
     X = torch.stack([latent.view(-1) for latent in valid_latents], dim=0)  # shape: (n, d)
-    # Normalize each latent to lie on the unit hypersphere
-    X = X / (torch.norm(X, dim=1, keepdim=True) + 1e-8)
-    # Initialize the barycenter as the weighted sum, then normalize
-    m = (weights.unsqueeze(1) * X).sum(dim=0, keepdim=True)
-    m = m / (torch.norm(m, dim=1, keepdim=True) + 1e-8)
-    for i in range(num_iterations):
-        logs = compute_log_map(m, X)  # shape: (n, d)
-        # Compute the weighted average of the tangent vectors
-        v = (weights.unsqueeze(1) * logs).sum(dim=0, keepdim=True)
-        norm_v = torch.norm(v, dim=1, keepdim=True)
-        m_new = exp_map(m, v)
-        if norm_v.item() < tol:
-            break
-        m = m_new
+
+    # Weighted sum in Euclidean space
+    w = weights.view(-1, 1)  # shape: (n, 1)
+    m = (w * X).sum(dim=0, keepdim=True)  # shape: (1, d)
+
     # Reshape the barycenter to the original latent shape
     original_shape = valid_latents[0].shape
     return m.view(original_shape)
 
+
 def images_encoding_rbi(model, images: list[np.ndarray], blending_weights: list[float],
-                               normal_famous_scaling: list[str], handler):
+                        normal_famous_scaling: list[str], handler):
     """
     Encode a list of images using the VAE model and blend their latent representations
-    using Riemannian Barycenter Interpolation (Fréchet mean).
+    using a Euclidean Barycenter in R^n (instead of the spherical approach).
 
     Args:
         model: The StableDiffusionXLPipeline model.
@@ -337,9 +293,10 @@ def images_encoding_rbi(model, images: list[np.ndarray], blending_weights: list[
             # Convert image to a PyTorch tensor and normalize pixel values
             scaled_image = torch.from_numpy(img).float() / 255.
             permuted_image = (scaled_image * 2 - 1).permute(2, 0, 1).unsqueeze(0)
+
             # Encode image using the VAE and scale accordingly
-            latent_img = model.vae.encode(permuted_image.to(model.vae.device))['latent_dist'].mean \
-                         * model.vae.config.scaling_factor
+            latent_output = model.vae.encode(permuted_image.to(model.vae.device))
+            latent_img = latent_output['latent_dist'].mean * model.vae.config.scaling_factor
 
             valid_latents.append(latent_img)
             valid_weights.append(weight)
@@ -351,9 +308,10 @@ def images_encoding_rbi(model, images: list[np.ndarray], blending_weights: list[
     valid_weights_tensor = torch.tensor(valid_weights, device=model.vae.device, dtype=torch.float32)
     valid_weights_tensor = valid_weights_tensor / valid_weights_tensor.sum()
 
-    # Compute the Riemannian barycenter of the latent representations
-    blended_latent_img = riemannian_barycenter(valid_latents, valid_weights_tensor)
+    # Compute the Euclidean barycenter of the latent representations
+    blended_latent_img = euclidean_barycenter(valid_latents, valid_weights_tensor)
 
     # Optionally, reset VAE to float16 precision
     model.vae.to(dtype=torch.float16)
+
     return blended_latent_img

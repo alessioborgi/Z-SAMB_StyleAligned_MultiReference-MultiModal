@@ -21,7 +21,7 @@ from typing import Callable
 from diffusers import StableDiffusionXLPipeline
 
 from .Tokenization_and_Embedding import embeddings_ensemble_with_neg_conditioning
-from .Encode_Image import images_encoding_rbi
+from .Encode_Image import images_encoding_ebi
 from .Diffusion import Generate_Noise_Prediction, Denoising_next_step, DDIM_Process, extract_latent_and_inversion
 T = torch.tensor # Create Alias for torch.tensor to increase readability.
 TN = T
@@ -35,7 +35,7 @@ Diff_Inversion_Process_Callback = Callable[[StableDiffusionXLPipeline, int, T, d
 def DDIM_Inversion_Process(model: StableDiffusionXLPipeline, x0: list[np.ndarray], blending_weights: list[float], prompt: str, num_inference_steps: int, guidance_scale, normal_famous_scaling, handler) -> T:
 
     # 1) Encode Image: Encode the input image into a latent representation using the model's VAE.
-    encoded_img = images_encoding_rbi(model, x0, blending_weights, normal_famous_scaling, handler)
+    encoded_img = images_encoding_ebi(model, x0, blending_weights, normal_famous_scaling, handler)
 
     # 2) Set Timesteps: Set the timesteps for the diffusion process.
     model.scheduler.set_timesteps(num_inference_steps, device=encoded_img.device)
