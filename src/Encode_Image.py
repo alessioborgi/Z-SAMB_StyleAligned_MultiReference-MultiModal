@@ -436,6 +436,9 @@ def images_encoding_rebi(model: StableDiffusionXLPipeline,
 
 
 # ############ MULTI-STYLE REFERENCE: ITERATIVE REWEIGHTED ROBUST EUCLIDEAN BARYCENTER WITH SUBSEQUENT STYLE REFINEMENT VIA GRAM MATRIX (FRECHET MEAN IN R^n) ###
+###############################################################################
+# Robust Euclidean Barycenter with Iterative Reweighting
+###############################################################################
 def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iterations=10):
     """
     Compute a robust weighted Euclidean barycenter of latent vectors using an iterative
@@ -584,7 +587,8 @@ def images_encoding_rebigram(model: StableDiffusionXLPipeline,
     blended_gram = blended_gram / sum(valid_weights)
     
     # Step 3: Refine the global barycenter latent to better match the blended style.
-    refined_latent = style_refine(blended_latent, blended_gram, num_steps=100, lr=0.01)
+    with torch.enable_grad():
+        refined_latent = style_refine(blended_latent, blended_gram, num_steps=100, lr=0.01)
     
     model.vae.to(dtype=torch.float16)
     return refined_latent
