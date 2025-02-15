@@ -597,6 +597,9 @@ def images_encoding_rebigram(model: StableDiffusionXLPipeline,
 
 # ############ MULTI-STYLE REFERENCE: (REBIGRAM++) ITERATIVE REWEIGHTED ROBUST EUCLIDEAN BARYCENTER WITH SUBSEQUENT STYLE REFINEMENT VIA GRAM MATRIX (FRECHET MEAN IN R^n) ###
 
+# -----------------------------------------------------------------------------
+# Robust Euclidean Barycenter with Iterative Reweighting (REBIGRAM)
+# -----------------------------------------------------------------------------
 def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iterations=10):
     """
     Compute a robust weighted Euclidean barycenter of latent vectors using an iterative reweighting scheme.
@@ -703,20 +706,31 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
     return latent_refined.detach()
 
 # -----------------------------------------------------------------------------
-# Advanced Feature Extractor using CLIP
+# Advanced Feature Extractor using CLIP (default extractor)
 # -----------------------------------------------------------------------------
 def extract_features(decoded_image):
     """
     Extract content features from a decoded image using a pretrained CLIP model.
     
     Args:
-        decoded_image: A torch.Tensor of shape (B, C, H, W) with pixel values in [0, 1].
+        decoded_image: A torch.Tensor of shape (B, C, H, W) with pixel values in [0, 1],
+                       or a DecoderOutput with a 'sample' attribute.
     
     Returns:
         The CLIP image features.
     """
     import clip
+    device = None
+    # If decoded_image is not a tensor, try to extract the underlying tensor.
+    if not isinstance(decoded_image, torch.Tensor):
+        if hasattr(decoded_image, 'sample'):
+            decoded_image = decoded_image.sample
+        elif isinstance(decoded_image, dict) and 'sample' in decoded_image:
+            decoded_image = decoded_image['sample']
+        else:
+            raise ValueError("Decoded image is not a tensor and cannot be processed.")
     device = decoded_image.device
+
     global clip_model
     if 'clip_model' not in globals():
         clip_model, _ = clip.load("ViT-B/32", device=device)
