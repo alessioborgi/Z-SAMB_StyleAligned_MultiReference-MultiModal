@@ -235,7 +235,7 @@ def euclidean_barycenter(valid_latents, weights):
     Compute the weighted Euclidean barycenter of latent vectors.
     
     Args:
-    
+
         valid_latents: List of torch tensors of latent representations.
                        Each tensor has shape (1, C, H, W).
         weights: 1D tensor of blending weights (summing to 1) for each latent.
@@ -313,6 +313,121 @@ def images_encoding_ebi(model, images: list[np.ndarray], blending_weights: list[
     blended_latent_img = euclidean_barycenter(valid_latents, valid_weights_tensor)
 
     # Optionally, reset VAE to float16 precision
+    model.vae.to(dtype=torch.float16)
+
+    return blended_latent_img
+
+
+# ############ MULTI-STYLE REFERENCE: WEIGHTED ROBUST EUCLIDEAN BARYCENTER INTERPOLATION(FRECHET MEAN IN R^n) ###
+
+
+def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iterations=10):
+    """
+    Compute a robust weighted Euclidean barycenter of latent vectors using an iterative reweighting scheme.
+    
+    Args:
+        valid_latents: List of torch tensors of latent representations.
+                       Each tensor has shape (1, C, H, W).
+        weights: 1D tensor of blending weights (summing to 1) for each latent.
+        delta: Hyperparameter controlling the threshold for robust weighting.
+        num_iterations: Maximum number of iterations for the reweighting procedure.
+    
+    Returns:
+        The robust blended latent representation, reshaped to the original latent shape.
+    """
+    # Flatten each latent into a vector.
+    X = torch.stack([latent.view(-1) for latent in valid_latents], dim=0)  # shape: (n, d)
+    # Initialize with the original weights.
+    combined_weights = weights.clone()
+    combined_weights = combined_weights / combined_weights.sum()
+    # Initial barycenter.
+    w = combined_weights.view(-1, 1)
+    m = (w * X).sum(dim=0, keepdim=True)  # shape: (1, d)
+    
+    for _ in range(num_iterations):
+        # Compute Euclidean distances of each latent from current barycenter.
+        distances = torch.norm(X - m, dim=1)  # shape: (n,)
+        # Compute robust reweighting factors: if distance < delta, use 1; else delta/distance.
+        robust_factors = torch.where(distances < delta,
+                                     torch.ones_like(distances),
+                                     delta / (distances + 1e-8))
+        # Combine original weights with robust factors.
+        new_weights = combined_weights * robust_factors
+        new_weights = new_weights / new_weights.sum()
+        w_new = new_weights.view(-1, 1)
+        m_new = (w_new * X).sum(dim=0, keepdim=True)
+        # Check for convergence.
+        if torch.norm(m_new - m) < 1e-6:
+            m = m_new
+            break
+        m = m_new
+        combined_weights = new_weights
+
+    original_shape = valid_latents[0].shape
+    return m.view(original_shape)
+
+
+def images_encoding_rebi(model: StableDiffusionXLPipeline,
+                        images: list[np.ndarray],
+                        blending_weights: list[float],
+                        normal_famous_scaling: list[str],
+                        handler: Handler):
+    """
+    Encode a list of images using the VAE model and blend their latent representations
+    using a robust Euclidean barycenter in R^n.
+    
+    Args:
+        model: The StableDiffusionXLPipeline model.
+        images: A list of numpy arrays, each representing an image.
+        blending_weights: A list of floats representing the blending weights for each image.
+                          These should sum to 1.
+        normal_famous_scaling: A list of classifications ("n" for normal, "f" for famous) for each image.
+        handler: An instance for handling style arguments (assumed to have a `register` method).
+    
+    Returns:
+        blended_latent_img: The robust blended latent representation.
+    """
+    # Validate input lengths.
+    assert len(images) == len(blending_weights), "Mismatch between number of images and blending_weights."
+    assert np.isclose(sum(blending_weights), 1.0), "blending_weights must sum to 1."
+    assert len(normal_famous_scaling) == len(images), "Mismatch between scaling classifications and images."
+
+    valid_latents = []
+    valid_weights = []
+
+    # Process each image.
+    for img, weight, scaling_type in zip(images, blending_weights, normal_famous_scaling):
+        model.vae.to(dtype=torch.float32)
+        if weight > 0.0:
+            # Apply style arguments based on scaling type.
+            if scaling_type == "n":
+                handler.register(normal_sa_args)
+            elif scaling_type == "f":
+                handler.register(famous_sa_args)
+            else:
+                raise ValueError(f"Invalid scaling type: {scaling_type}")
+
+            # Convert image to a PyTorch tensor and normalize pixel values.
+            scaled_image = torch.from_numpy(img).float() / 255.
+            permuted_image = (scaled_image * 2 - 1).permute(2, 0, 1).unsqueeze(0)
+            # Encode image using the VAE and scale accordingly.
+            latent_output = model.vae.encode(permuted_image.to(model.vae.device))
+            latent_img = latent_output['latent_dist'].mean * model.vae.config.scaling_factor
+
+            valid_latents.append(latent_img)
+            valid_weights.append(weight)
+
+    if not valid_latents:
+        raise ValueError("No valid latent representations obtained.")
+
+    # Convert weights to a tensor and normalize.
+    valid_weights_tensor = torch.tensor(valid_weights, device=model.vae.device, dtype=torch.float32)
+    valid_weights_tensor = valid_weights_tensor / valid_weights_tensor.sum()
+
+    # Compute the robust Euclidean barycenter of the latent representations.
+    blended_latent_img = robust_euclidean_barycenter(valid_latents, valid_weights_tensor)
+
+    # Optionally, reset VAE to float16 precision.
     model.vae.to(dtype=torch.float16)
 
     return blended_latent_img
