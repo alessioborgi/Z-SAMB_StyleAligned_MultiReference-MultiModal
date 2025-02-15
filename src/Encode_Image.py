@@ -225,3 +225,135 @@ def images_encoding_slerp(model, images: list[np.ndarray], blending_weights: lis
 
     # Return the blended latent representation.
     return blended_latent_img
+
+
+
+############ MULTI-STYLE REFERENCE: WEIGHTED RBI (RIEMANNIAN BARYCENTER INTERPOLATION) (FRECHET MEAN INTERPOLATION)###
+import torch
+import numpy as np
+
+# Helper functions for the spherical (Riemannian) operations
+
+def compute_log_map(m, X):
+    """
+    Compute the logarithmic map at base point m for each point in X.
+    Args:
+        m: Tensor of shape (1, d) representing the base point (normalized).
+        X: Tensor of shape (n, d) representing n points (each normalized).
+    Returns:
+        Tensor of shape (n, d) containing the tangent vectors.
+    """
+    # Dot product between m and each row in X
+    dot = torch.matmul(X, m.t())  # shape: (n, 1)
+    # Clamp to ensure numerical stability
+    dot = torch.clamp(dot, -1.0, 1.0)
+    theta = torch.acos(dot)  # angular distance, shape: (n, 1)
+    sin_theta = torch.sin(theta)
+    # Avoid division by zero
+    factor = theta / (sin_theta + 1e-8)
+    return factor * (X - dot * m)
+
+def exp_map(m, v):
+    """
+    Compute the exponential map at base point m for a tangent vector v.
+    Args:
+        m: Tensor of shape (1, d) representing the base point.
+        v: Tensor of shape (1, d) tangent vector at m.
+    Returns:
+        Tensor of shape (1, d) representing the mapped point on the sphere.
+    """
+    norm_v = torch.norm(v, dim=1, keepdim=True)
+    return torch.cos(norm_v) * m + torch.sin(norm_v) * (v / (norm_v + 1e-8))
+
+def riemannian_barycenter(valid_latents, weights, num_iterations=100, tol=1e-6):
+    """
+    Compute the weighted Riemannian barycenter (Fréchet mean) of latent vectors.
+    Args:
+        valid_latents: List of torch tensors of latent representations.
+                       Each tensor is assumed to have shape (1, C, H, W).
+        weights: 1D tensor of blending weights (summing to 1) for each latent.
+        num_iterations: Maximum number of iterations for convergence.
+        tol: Tolerance for the norm of the update vector.
+    Returns:
+        The blended latent representation, reshaped to the original latent shape.
+    """
+    # Flatten each latent into a vector
+    X = torch.stack([latent.view(-1) for latent in valid_latents], dim=0)  # shape: (n, d)
+    # Normalize each latent to lie on the unit hypersphere
+    X = X / (torch.norm(X, dim=1, keepdim=True) + 1e-8)
+    # Initialize the barycenter as the weighted sum, then normalize
+    m = (weights.unsqueeze(1) * X).sum(dim=0, keepdim=True)
+    m = m / (torch.norm(m, dim=1, keepdim=True) + 1e-8)
+    for i in range(num_iterations):
+        logs = compute_log_map(m, X)  # shape: (n, d)
+        # Compute the weighted average of the tangent vectors
+        v = (weights.unsqueeze(1) * logs).sum(dim=0, keepdim=True)
+        norm_v = torch.norm(v, dim=1, keepdim=True)
+        m_new = exp_map(m, v)
+        if norm_v.item() < tol:
+            break
+        m = m_new
+    # Reshape the barycenter to the original latent shape
+    original_shape = valid_latents[0].shape
+    return m.view(original_shape)
+
+def images_encoding_rbi(model, images: list[np.ndarray], blending_weights: list[float],
+                               normal_famous_scaling: list[str], handler):
+    """
+    Encode a list of images using the VAE model and blend their latent representations
+    using Riemannian Barycenter Interpolation (Fréchet mean).
+
+    Args:
+        model: The StableDiffusionXLPipeline model.
+        images: A list of numpy arrays, each representing an image.
+        blending_weights: A list of floats representing the blending weights for each image.
+                          These should sum to 1.
+        normal_famous_scaling: A list of classifications ("n" for normal, "f" for famous) for each image.
+        handler: An instance for handling style arguments (assumed to have a `register` method).
+
+    Returns:
+        blended_latent_img: The blended latent representation.
+    """
+    # Check that inputs are consistent.
+    assert len(images) == len(blending_weights), "Mismatch between number of images and blending_weights."
+    assert np.isclose(sum(blending_weights), 1.0), "blending_weights must sum to 1."
+    assert len(normal_famous_scaling) == len(images), "Mismatch between scaling classifications and images."
+
+    valid_latents = []
+    valid_weights = []
+
+    # Process each image
+    for img, weight, scaling_type in zip(images, blending_weights, normal_famous_scaling):
+        model.vae.to(dtype=torch.float32)
+        if weight > 0.0:
+            # Dynamically apply the style arguments based on scaling type
+            if scaling_type == "n":
+                handler.register(normal_sa_args)
+            elif scaling_type == "f":
+                handler.register(famous_sa_args)
+            else:
+                raise ValueError(f"Invalid scaling type: {scaling_type}")
+
+            # Convert image to a PyTorch tensor and normalize pixel values
+            scaled_image = torch.from_numpy(img).float() / 255.
+            permuted_image = (scaled_image * 2 - 1).permute(2, 0, 1).unsqueeze(0)
+            # Encode image using the VAE and scale accordingly
+            latent_img = model.vae.encode(permuted_image.to(model.vae.device))['latent_dist'].mean \
+                         * model.vae.config.scaling_factor
+
+            valid_latents.append(latent_img)
+            valid_weights.append(weight)
+
+    if not valid_latents:
+        raise ValueError("No valid latent representations obtained.")
+
+    # Convert weights to a tensor and normalize them
+    valid_weights_tensor = torch.tensor(valid_weights, device=model.vae.device, dtype=torch.float32)
+    valid_weights_tensor = valid_weights_tensor / valid_weights_tensor.sum()
+
+    # Compute the Riemannian barycenter of the latent representations
+    blended_latent_img = riemannian_barycenter(valid_latents, valid_weights_tensor)
+
+    # Optionally, reset VAE to float16 precision
+    model.vae.to(dtype=torch.float16)
+    return blended_latent_img
