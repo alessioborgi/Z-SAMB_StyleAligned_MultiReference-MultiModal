@@ -596,7 +596,6 @@ def images_encoding_rebigram(model: StableDiffusionXLPipeline,
 
 
 # ############ MULTI-STYLE REFERENCE: (REBIGRAM++) ITERATIVE REWEIGHTED ROBUST EUCLIDEAN BARYCENTER WITH SUBSEQUENT STYLE REFINEMENT VIA GRAM MATRIX (FRECHET MEAN IN R^n) ###
-
 # -----------------------------------------------------------------------------
 # Robust Euclidean Barycenter with Iterative Reweighting (REBIGRAM)
 # -----------------------------------------------------------------------------
@@ -653,72 +652,12 @@ def compute_gram_matrix(feature):
     return gram
 
 # -----------------------------------------------------------------------------
-# Advanced Style Refinement via Gradient Descent (REBIGRAM++)
-# -----------------------------------------------------------------------------
-def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
-                          num_steps=50, lr=0.01, tv_weight=0.001, content_weight=0.1):
-    """
-    Refine the latent representation to better match the target style and content,
-    using mixed precision to reduce GPU memory usage.
-    
-    The loss is a weighted sum of:
-      - Style loss (MSE between the latent's Gram matrix and target Gram matrix)
-      - Content loss (MSE between extracted features of the decoded latent and target content features)
-      - Total Variation (TV) loss for spatial smoothness.
-    
-    Args:
-        latent: The initial blended latent tensor, shape (1, C, H, W).
-        target_gram: The target Gram matrix for style.
-        target_content: The target content features.
-        extract_features: Function to extract content features from a decoded image.
-        model: The StableDiffusionXLPipeline model (used to decode the latent).
-        num_steps: Number of optimization steps (reduced here to 50).
-        lr: Learning rate.
-        tv_weight: Weight for TV loss.
-        content_weight: Weight for content loss.
-    
-    Returns:
-        The refined latent representation.
-    """
-    latent_refined = latent.clone().detach().float()
-    latent_refined.requires_grad_(True)
-    
-    optimizer = torch.optim.Adam([latent_refined], lr=lr)
-    scaler = torch.cuda.amp.GradScaler()
-
-    def total_variation_loss(img):
-        return torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])) + \
-               torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]))
-
-    for step in range(num_steps):
-        optimizer.zero_grad()
-        with torch.cuda.amp.autocast():
-            current_gram = compute_gram_matrix(latent_refined)
-            style_loss = torch.nn.functional.mse_loss(current_gram, target_gram)
-            
-            decoded = model.vae.decode(latent_refined)
-            current_features = extract_features(decoded)
-            content_loss = torch.nn.functional.mse_loss(current_features, target_content)
-            
-            tv_loss = total_variation_loss(latent_refined)
-            loss = style_loss + content_weight * content_loss + tv_weight * tv_loss
-        
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        if step % 10 == 0:
-            torch.cuda.empty_cache()
-    return latent_refined.detach()
-
-
-# -----------------------------------------------------------------------------
-# Advanced Feature Extractor using CLIP (default extractor)
+# Advanced Feature Extractor using CLIP (default extractor on CPU)
 # -----------------------------------------------------------------------------
 def extract_features(decoded_image):
     """
     Extract content features from a decoded image using a pretrained CLIP model,
-    running the CLIP encoder on CPU to reduce GPU memory usage.
+    running the CLIP encoder entirely on CPU to reduce GPU memory usage.
     
     Args:
         decoded_image: A torch.Tensor of shape (B, C, H, W) with pixel values in [0, 1],
@@ -728,7 +667,7 @@ def extract_features(decoded_image):
         The CLIP image features (on CPU).
     """
     import clip
-    # Ensure decoded_image is a tensor. If not, try to extract it.
+    # Ensure decoded_image is a tensor.
     if not isinstance(decoded_image, torch.Tensor):
         if hasattr(decoded_image, 'sample'):
             decoded_image = decoded_image.sample
@@ -737,29 +676,93 @@ def extract_features(decoded_image):
         else:
             raise ValueError("Decoded image is not a tensor and cannot be processed.")
     
-    # Force CLIP processing on CPU.
     device_cpu = torch.device("cpu")
-    
     global clip_model
     if 'clip_model' not in globals():
         clip_model, _ = clip.load("ViT-B/32", device=device_cpu, jit=False)
         clip_model.eval()
-    
     # Move decoded image to CPU.
     decoded_cpu = decoded_image.to(device_cpu)
-    
-    # Resize to 224x224 required by CLIP.
     resized = torch.nn.functional.interpolate(decoded_cpu, size=(224, 224), mode='bilinear', align_corners=False)
-    
-    # Normalize using CLIP's mean and std.
     mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device_cpu).view(1, 3, 1, 1)
     std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device_cpu).view(1, 3, 1, 1)
     normed = (resized - mean) / std
-    
     with torch.no_grad():
         features = clip_model.encode_image(normed)
-    return features
+    return features  # remains on CPU
 
+# -----------------------------------------------------------------------------
+# Advanced Style Refinement via Gradient Descent (REBIGRAM++)
+# -----------------------------------------------------------------------------
+def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
+                          num_steps=100, lr=0.01, tv_weight=0.001, content_weight=0.1):
+    """
+    Refine the latent representation to better match the target style and content.
+    
+    The loss is a weighted sum of:
+      - Style loss (MSE between the latent's Gram matrix and target Gram matrix)
+      - Content loss (MSE between extracted features of the decoded latent and target content features)
+      - Total Variation (TV) loss for spatial smoothness.
+    
+    This version moves the refinement process entirely onto the CPU.
+    
+    Args:
+        latent: The initial blended latent tensor, shape (1, C, H, W).
+        target_gram: The target Gram matrix for style.
+        target_content: The target content features.
+        extract_features: Function to extract content features from a decoded image.
+        model: The StableDiffusionXLPipeline model (used to decode the latent).
+        num_steps: Number of optimization steps.
+        lr: Learning rate.
+        tv_weight: Weight for TV loss.
+        content_weight: Weight for content loss.
+    
+    Returns:
+        The refined latent representation, moved back to the original device.
+    """
+    # Move latent to CPU.
+    latent_refined = latent.clone().detach().float().to("cpu")
+    latent_refined.requires_grad_(True)
+    
+    optimizer = torch.optim.Adam([latent_refined], lr=lr)
+    
+    def total_variation_loss(img):
+        return torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])) + \
+               torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]))
+    
+    # Move VAE to CPU for decoding.
+    model.vae.to("cpu")
+    
+    for step in range(num_steps):
+        optimizer.zero_grad()
+        current_gram = compute_gram_matrix(latent_refined)
+        # Convert target_gram to CPU if needed.
+        style_loss = torch.nn.functional.mse_loss(current_gram, target_gram.to("cpu"))
+        
+        decoded = model.vae.decode(latent_refined)
+        # Ensure decoded is a tensor.
+        if not isinstance(decoded, torch.Tensor):
+            if hasattr(decoded, "sample"):
+                decoded = decoded.sample
+            elif isinstance(decoded, dict) and "sample" in decoded:
+                decoded = decoded["sample"]
+        current_features = extract_features(decoded)  # features on CPU
+        content_loss = torch.nn.functional.mse_loss(current_features, target_content.to("cpu"))
+        
+        tv_loss = total_variation_loss(latent_refined)
+        loss = style_loss + content_weight * content_loss + tv_weight * tv_loss
+        loss.backward()
+        optimizer.step()
+        if step % 10 == 0:
+            torch.cuda.empty_cache()
+    
+    refined = latent_refined.detach()
+    # Move refined latent back to the original device.
+    original_device = model.vae.device  # This should be the GPU device originally used.
+    refined = refined.to(original_device)
+    # Move VAE back to its original device.
+    model.vae.to(original_device)
+    return refined
 
 # -----------------------------------------------------------------------------
 # Advanced Multi-Style Reference Blending (REBIGRAM++)
@@ -786,8 +789,8 @@ def images_encoding_rebigram_plus_plus(model: StableDiffusionXLPipeline,
         blending_weights: List of floats (should sum to 1).
         normal_famous_scaling: List of classifications ("n" for normal, "f" for famous) for each image.
         handler: An instance for handling style arguments.
-        extract_features_func: A function that extracts content features from a decoded image.
-            Defaults to our built-in CLIP-based extractor.
+        extract_features_func: Function to extract content features from a decoded image.
+            Defaults to our built-in CLIP-based extractor (which runs on CPU).
     
     Returns:
         The advanced blended latent representation (REBIGRAM++).
