@@ -597,9 +597,6 @@ def images_encoding_rebigram(model: StableDiffusionXLPipeline,
 
 # ############ MULTI-STYLE REFERENCE: (REBIGRAM++) ITERATIVE REWEIGHTED ROBUST EUCLIDEAN BARYCENTER WITH SUBSEQUENT STYLE REFINEMENT VIA GRAM MATRIX (FRECHET MEAN IN R^n) ###
 
-###############################################################################
-# Robust Euclidean Barycenter with Iterative Reweighting (same as before)
-###############################################################################
 def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iterations=10):
     """
     Compute a robust weighted Euclidean barycenter of latent vectors using an iterative reweighting scheme.
@@ -616,7 +613,7 @@ def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iteration
     X = torch.stack([latent.view(-1) for latent in valid_latents], dim=0)  # (n, d)
     combined_weights = weights.clone() / weights.sum()
     m = (combined_weights.view(-1, 1) * X).sum(dim=0, keepdim=True)
-
+    
     for _ in range(num_iterations):
         distances = torch.norm(X - m, dim=1)
         robust_factors = torch.where(distances < delta,
@@ -634,9 +631,9 @@ def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iteration
     original_shape = valid_latents[0].shape
     return m.view(original_shape)
 
-###############################################################################
-# Gram Matrix Computation for Style Representation (same as before)
-###############################################################################
+# -----------------------------------------------------------------------------
+# Gram Matrix Computation for Style Representation
+# -----------------------------------------------------------------------------
 def compute_gram_matrix(feature):
     """
     Compute the Gram matrix for a feature map.
@@ -652,9 +649,9 @@ def compute_gram_matrix(feature):
     gram = torch.mm(feature, feature.t()) / (c * h * w)
     return gram
 
-###############################################################################
+# -----------------------------------------------------------------------------
 # Advanced Style Refinement via Gradient Descent (REBIGRAM++)
-###############################################################################
+# -----------------------------------------------------------------------------
 def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
                           num_steps=100, lr=0.01, tv_weight=0.001, content_weight=0.1):
     """
@@ -705,15 +702,44 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
         optimizer.step()
     return latent_refined.detach()
 
-###############################################################################
+# -----------------------------------------------------------------------------
+# Advanced Feature Extractor using CLIP
+# -----------------------------------------------------------------------------
+def extract_features(decoded_image):
+    """
+    Extract content features from a decoded image using a pretrained CLIP model.
+    
+    Args:
+        decoded_image: A torch.Tensor of shape (B, C, H, W) with pixel values in [0, 1].
+    
+    Returns:
+        The CLIP image features.
+    """
+    import clip
+    device = decoded_image.device
+    global clip_model
+    if 'clip_model' not in globals():
+        clip_model, _ = clip.load("ViT-B/32", device=device)
+        clip_model.eval()
+    # Resize image to 224x224 required by CLIP.
+    resized = torch.nn.functional.interpolate(decoded_image, size=(224, 224), mode='bilinear', align_corners=False)
+    # Normalize using CLIP's mean and std.
+    mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device).view(1, 3, 1, 1)
+    std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device).view(1, 3, 1, 1)
+    normed = (resized - mean) / std
+    with torch.no_grad():
+        features = clip_model.encode_image(normed)
+    return features
+
+# -----------------------------------------------------------------------------
 # Advanced Multi-Style Reference Blending (REBIGRAM++)
-###############################################################################
+# -----------------------------------------------------------------------------
 def images_encoding_rebigram_plus_plus(model: StableDiffusionXLPipeline,
                                        images: list[np.ndarray],
                                        blending_weights: list[float],
                                        normal_famous_scaling: list[str],
                                        handler: Handler,
-                                       extract_features):
+                                       extract_features_func=extract_features):
     """
     Encode multiple images using the VAE and blend their latent representations using
     a robust Euclidean barycenter with subsequent multi-objective style refinement.
@@ -730,7 +756,8 @@ def images_encoding_rebigram_plus_plus(model: StableDiffusionXLPipeline,
         blending_weights: List of floats (should sum to 1).
         normal_famous_scaling: List of classifications ("n" for normal, "f" for famous) for each image.
         handler: An instance for handling style arguments.
-        extract_features: A function that extracts content features from a decoded image.
+        extract_features_func: A function that extracts content features from a decoded image.
+            Defaults to our built-in CLIP-based extractor.
     
     Returns:
         The advanced blended latent representation (REBIGRAM++).
@@ -767,7 +794,7 @@ def images_encoding_rebigram_plus_plus(model: StableDiffusionXLPipeline,
             
             # Decode the latent to get a reference image, then extract content features.
             decoded_img = model.vae.decode(latent_img)
-            content_features.append(extract_features(decoded_img))
+            content_features.append(extract_features_func(decoded_img))
     
     if not valid_latents:
         raise ValueError("No valid latent representations obtained.")
@@ -789,7 +816,7 @@ def images_encoding_rebigram_plus_plus(model: StableDiffusionXLPipeline,
     # Step 4: Refine the barycenter latent using advanced multi-objective loss.
     with torch.enable_grad():
         refined_latent = style_refine_advanced(blended_latent, blended_gram, blended_content,
-                                               extract_features, model, num_steps=100, lr=0.01,
+                                               extract_features_func, model, num_steps=100, lr=0.01,
                                                tv_weight=0.001, content_weight=0.1)
     
     model.vae.to(dtype=torch.float16)
