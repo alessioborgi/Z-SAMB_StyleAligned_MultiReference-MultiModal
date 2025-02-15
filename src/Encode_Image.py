@@ -436,23 +436,16 @@ def images_encoding_rebi(model: StableDiffusionXLPipeline,
 
 
 # ############ MULTI-STYLE REFERENCE: ITERATIVE REWEIGHTED ROBUST EUCLIDEAN BARYCENTER WITH SUBSEQUENT STYLE REFINEMENT VIA GRAM MATRIX (FRECHET MEAN IN R^n) ###
-
-
-###############################################################################
-# 1. Robust Euclidean Barycenter with Iterative Reweighting
-###############################################################################
 def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iterations=10):
     """
     Compute a robust weighted Euclidean barycenter of latent vectors using an iterative
-    reweighting scheme. Outlier latents are downweighted based on their distance from
-    the current estimate.
+    reweighting scheme.
     
     Args:
-        valid_latents: List of torch tensors of latent representations.
-                       Each tensor has shape (1, C, H, W).
-        weights: 1D tensor of blending weights (summing to 1) for each latent.
+        valid_latents: List of torch tensors of latent representations, each of shape (1, C, H, W).
+        weights: 1D tensor of blending weights (summing to 1).
         delta: Hyperparameter controlling the threshold for robust weighting.
-        num_iterations: Maximum number of iterations for the reweighting procedure.
+        num_iterations: Number of iterations for reweighting.
     
     Returns:
         The robust blended latent representation, reshaped to the original latent shape.
@@ -463,7 +456,7 @@ def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iteration
     m = (combined_weights.view(-1, 1) * X).sum(dim=0, keepdim=True)  # initial barycenter
 
     for _ in range(num_iterations):
-        distances = torch.norm(X - m, dim=1)  # Euclidean distance from current barycenter
+        distances = torch.norm(X - m, dim=1)  # Euclidean distances
         robust_factors = torch.where(distances < delta,
                                      torch.ones_like(distances),
                                      delta / (distances + 1e-8))
@@ -480,13 +473,15 @@ def robust_euclidean_barycenter(valid_latents, weights, delta=1.0, num_iteration
     return m.view(original_shape)
 
 ###############################################################################
-# 2. Style Refinement via Gram Matrix Matching
+# Gram Matrix Computation for Style Representation
 ###############################################################################
 def compute_gram_matrix(feature):
     """
     Compute the Gram matrix for a feature map.
+    
     Args:
         feature: A tensor of shape (1, C, H, W).
+    
     Returns:
         Gram matrix of shape (C, C).
     """
@@ -495,21 +490,26 @@ def compute_gram_matrix(feature):
     gram = torch.mm(feature, feature.t()) / (c * h * w)
     return gram
 
+###############################################################################
+# Style Refinement via Gradient Descent
+###############################################################################
 def style_refine(latent, target_gram, num_steps=100, lr=0.01):
     """
-    Refine the latent representation so that its style (measured via the Gram matrix)
-    matches the target blended style. This is done via gradient descent.
+    Refine the latent representation to better match the target style (via Gram matrix).
     
     Args:
         latent: The initial blended latent tensor, shape (1, C, H, W).
-        target_gram: The target Gram matrix (style representation).
+        target_gram: The target Gram matrix.
         num_steps: Number of optimization steps.
-        lr: Learning rate for the refinement process.
+        lr: Learning rate.
     
     Returns:
         The refined latent representation.
     """
-    latent_refined = latent.clone().detach().requires_grad_(True)
+    # Ensure latent is float32 and a leaf tensor requiring gradients.
+    latent_refined = latent.clone().detach().float()
+    latent_refined.requires_grad_(True)
+    
     optimizer = torch.optim.Adam([latent_refined], lr=lr)
     
     for step in range(num_steps):
@@ -521,30 +521,27 @@ def style_refine(latent, target_gram, num_steps=100, lr=0.01):
     return latent_refined.detach()
 
 ###############################################################################
-# 3. Advanced Multi-Style Reference Blending Function
+# Advanced Multi-Style Reference Blending (REBIGRAM)
 ###############################################################################
 def images_encoding_rebigram(model: StableDiffusionXLPipeline,
-                                 images: list[np.ndarray],
-                                 blending_weights: list[float],
-                                 normal_famous_scaling: list[str],
-                                 handler: Handler):
+                             images: list[np.ndarray],
+                             blending_weights: list[float],
+                             normal_famous_scaling: list[str],
+                             handler: Handler):
     """
     Encode a list of images using the VAE model and blend their latent representations
-    using a robust Euclidean barycenter with subsequent style refinement via Gram matrix
-    matching. This two-step process aims to perfectly mix the styles by preserving both
-    content and fine style details.
+    using a robust Euclidean barycenter with subsequent style refinement via Gram matrix matching.
     
     Args:
         model: The StableDiffusionXLPipeline model.
         images: List of numpy arrays, each representing an image.
-        blending_weights: List of floats representing blending weights (must sum to 1).
-        normal_famous_scaling: List of classifications ("n" for normal, "f" for famous) per image.
-        handler: An instance for handling style arguments (assumed to have a `register` method).
+        blending_weights: List of floats (should sum to 1).
+        normal_famous_scaling: List of classifications ("n" for normal, "f" for famous).
+        handler: An instance for handling style arguments.
     
     Returns:
         The advanced blended latent representation.
     """
-    # Validate input lengths.
     assert len(images) == len(blending_weights), "Mismatch between images and blending_weights."
     assert np.isclose(sum(blending_weights), 1.0), "blending_weights must sum to 1."
     assert len(normal_famous_scaling) == len(images), "Mismatch between scaling classifications and images."
@@ -564,15 +561,13 @@ def images_encoding_rebigram(model: StableDiffusionXLPipeline,
             else:
                 raise ValueError(f"Invalid scaling type: {scaling_type}")
             
-            # Convert and preprocess image.
             scaled_image = torch.from_numpy(img).float() / 255.
             permuted_image = (scaled_image * 2 - 1).permute(2, 0, 1).unsqueeze(0)
-            # Encode image using the VAE.
             latent_output = model.vae.encode(permuted_image.to(model.vae.device))
             latent_img = latent_output['latent_dist'].mean * model.vae.config.scaling_factor
+
             valid_latents.append(latent_img)
             valid_weights.append(weight)
-            # Compute the style representation (Gram matrix).
             gram_matrices.append(compute_gram_matrix(latent_img))
     
     if not valid_latents:
@@ -586,7 +581,7 @@ def images_encoding_rebigram(model: StableDiffusionXLPipeline,
     
     # Step 2: Blend the style information (Gram matrices) as a weighted sum.
     blended_gram = sum(w * g for w, g in zip(valid_weights, gram_matrices))
-    blended_gram = blended_gram / sum(valid_weights)  # Normalize
+    blended_gram = blended_gram / sum(valid_weights)
     
     # Step 3: Refine the global barycenter latent to better match the blended style.
     refined_latent = style_refine(blended_latent, blended_gram, num_steps=100, lr=0.01)
