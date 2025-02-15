@@ -235,6 +235,7 @@ def euclidean_barycenter(valid_latents, weights):
     Compute the weighted Euclidean barycenter of latent vectors.
     
     Args:
+    
         valid_latents: List of torch tensors of latent representations.
                        Each tensor has shape (1, C, H, W).
         weights: 1D tensor of blending weights (summing to 1) for each latent.
