@@ -656,9 +656,10 @@ def compute_gram_matrix(feature):
 # Advanced Style Refinement via Gradient Descent (REBIGRAM++)
 # -----------------------------------------------------------------------------
 def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
-                          num_steps=100, lr=0.01, tv_weight=0.001, content_weight=0.1):
+                          num_steps=50, lr=0.01, tv_weight=0.001, content_weight=0.1):
     """
-    Refine the latent representation to better match the target style and content.
+    Refine the latent representation to better match the target style and content,
+    using mixed precision to reduce GPU memory usage.
     
     The loss is a weighted sum of:
       - Style loss (MSE between the latent's Gram matrix and target Gram matrix)
@@ -668,13 +669,13 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
     Args:
         latent: The initial blended latent tensor, shape (1, C, H, W).
         target_gram: The target Gram matrix for style.
-        target_content: The target content features (extracted from decoded reference images).
-        extract_features: A function that extracts content features from a decoded image.
+        target_content: The target content features.
+        extract_features: Function to extract content features from a decoded image.
         model: The StableDiffusionXLPipeline model (used to decode the latent).
-        num_steps: Number of optimization steps.
+        num_steps: Number of optimization steps (reduced here to 50).
         lr: Learning rate.
-        tv_weight: Weight for the Total Variation loss.
-        content_weight: Weight for the content loss.
+        tv_weight: Weight for TV loss.
+        content_weight: Weight for content loss.
     
     Returns:
         The refined latent representation.
@@ -683,27 +684,33 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
     latent_refined.requires_grad_(True)
     
     optimizer = torch.optim.Adam([latent_refined], lr=lr)
-    
+    scaler = torch.cuda.amp.GradScaler()
+
     def total_variation_loss(img):
         return torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])) + \
                torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]))
-    
+
     for step in range(num_steps):
         optimizer.zero_grad()
-        current_gram = compute_gram_matrix(latent_refined)
-        style_loss = torch.nn.functional.mse_loss(current_gram, target_gram)
+        with torch.cuda.amp.autocast():
+            current_gram = compute_gram_matrix(latent_refined)
+            style_loss = torch.nn.functional.mse_loss(current_gram, target_gram)
+            
+            decoded = model.vae.decode(latent_refined)
+            current_features = extract_features(decoded)
+            content_loss = torch.nn.functional.mse_loss(current_features, target_content)
+            
+            tv_loss = total_variation_loss(latent_refined)
+            loss = style_loss + content_weight * content_loss + tv_weight * tv_loss
         
-        # Decode latent to image and extract features for content loss.
-        decoded = model.vae.decode(latent_refined)
-        current_features = extract_features(decoded)
-        content_loss = torch.nn.functional.mse_loss(current_features, target_content)
-        
-        tv_loss = total_variation_loss(latent_refined)
-        
-        loss = style_loss + content_weight * content_loss + tv_weight * tv_loss
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        if step % 10 == 0:
+            torch.cuda.empty_cache()
     return latent_refined.detach()
+
 
 # -----------------------------------------------------------------------------
 # Advanced Feature Extractor using CLIP (default extractor)
