@@ -253,7 +253,7 @@ def euclidean_barycenter(valid_latents, weights):
     return m.view(original_shape)
 
 
-def images_encoding_rbi(model, images: list[np.ndarray], blending_weights: list[float],
+def images_encoding_ebi(model, images: list[np.ndarray], blending_weights: list[float],
                         normal_famous_scaling: list[str], handler):
     """
     Encode a list of images using the VAE model and blend their latent representations
