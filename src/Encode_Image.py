@@ -654,6 +654,43 @@ def compute_gram_matrix(feature):
 # -----------------------------------------------------------------------------
 # Advanced Feature Extractor using CLIP (default extractor on CPU)
 # -----------------------------------------------------------------------------
+# def extract_features(decoded_image):
+#     """
+#     Extract content features from a decoded image using a pretrained CLIP model,
+#     running the CLIP encoder entirely on CPU to reduce GPU memory usage.
+    
+#     Args:
+#         decoded_image: A torch.Tensor of shape (B, C, H, W) with pixel values in [0, 1],
+#                        or a DecoderOutput with a 'sample' attribute.
+    
+#     Returns:
+#         The CLIP image features (on CPU).
+#     """
+#     import clip
+#     # Ensure decoded_image is a tensor.
+#     if not isinstance(decoded_image, torch.Tensor):
+#         if hasattr(decoded_image, 'sample'):
+#             decoded_image = decoded_image.sample
+#         elif isinstance(decoded_image, dict) and 'sample' in decoded_image:
+#             decoded_image = decoded_image['sample']
+#         else:
+#             raise ValueError("Decoded image is not a tensor and cannot be processed.")
+    
+#     device_cpu = torch.device("cpu")
+#     global clip_model
+#     if 'clip_model' not in globals():
+#         clip_model, _ = clip.load("ViT-B/32", device=device_cpu, jit=False)
+#         clip_model.eval()
+#     # Move decoded image to CPU.
+#     decoded_cpu = decoded_image.to(device_cpu)
+#     resized = torch.nn.functional.interpolate(decoded_cpu, size=(224, 224), mode='bilinear', align_corners=False)
+#     mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device_cpu).view(1, 3, 1, 1)
+#     std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device_cpu).view(1, 3, 1, 1)
+#     normed = (resized - mean) / std
+#     with torch.no_grad():
+#         features = clip_model.encode_image(normed)
+#     return features  # remains on CPU
+
 def extract_features(decoded_image):
     """
     Extract content features from a decoded image using a pretrained CLIP model,
@@ -681,15 +718,16 @@ def extract_features(decoded_image):
     if 'clip_model' not in globals():
         clip_model, _ = clip.load("ViT-B/32", device=device_cpu, jit=False)
         clip_model.eval()
-    # Move decoded image to CPU.
-    decoded_cpu = decoded_image.to(device_cpu)
+    # Move decoded image to CPU and cast to float32.
+    decoded_cpu = decoded_image.to(device_cpu).float()
     resized = torch.nn.functional.interpolate(decoded_cpu, size=(224, 224), mode='bilinear', align_corners=False)
     mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device_cpu).view(1, 3, 1, 1)
     std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device_cpu).view(1, 3, 1, 1)
     normed = (resized - mean) / std
     with torch.no_grad():
         features = clip_model.encode_image(normed)
-    return features  # remains on CPU
+    return features
+
 
 # -----------------------------------------------------------------------------
 # Advanced Style Refinement via Gradient Descent (REBIGRAM++)
