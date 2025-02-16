@@ -694,71 +694,134 @@ def extract_features(decoded_image):
 # -----------------------------------------------------------------------------
 # Advanced Style Refinement via Gradient Descent (REBIGRAM++)
 # -----------------------------------------------------------------------------
-def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
-                            num_steps=100, lr=0.01, tv_weight=0.001, content_weight=0.1):
-    """
-    Refine the latent representation to better match the target style and content,
-    by performing refinement on CPU using a temporary copy of the VAE.
+# def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
+#                             num_steps=100, lr=0.01, tv_weight=0.001, content_weight=0.1):
+#     """
+#     Refine the latent representation to better match the target style and content,
+#     by performing refinement on CPU using a temporary copy of the VAE.
     
-    The loss is a weighted sum of:
-      - Style loss (MSE between the latent's Gram matrix and target Gram matrix)
-      - Content loss (MSE between extracted features of the decoded latent and target content features)
-      - Total Variation (TV) loss for spatial smoothness.
+#     The loss is a weighted sum of:
+#       - Style loss (MSE between the latent's Gram matrix and target Gram matrix)
+#       - Content loss (MSE between extracted features of the decoded latent and target content features)
+#       - Total Variation (TV) loss for spatial smoothness.
+    
+#     Args:
+#         latent: The initial blended latent tensor, shape (1, C, H, W), on the original device.
+#         target_gram: The target Gram matrix for style.
+#         target_content: The target content features.
+#         extract_features: A function that extracts content features from a decoded image.
+#         model: The StableDiffusionXLPipeline model.
+#         num_steps: Number of optimization steps.
+#         lr: Learning rate.
+#         tv_weight: Weight for TV loss.
+#         content_weight: Weight for content loss.
+    
+#     Returns:
+#         The refined latent representation on the original device.
+#     """
+#     # Store the original device (likely cuda:0).
+#     original_device = model.vae.device
+#     # Create a temporary copy of the VAE on CPU for the refinement.
+#     vae_cpu = model.vae.to("cpu")
+    
+#     # Move the latent to CPU for refinement.
+#     latent_refined = latent.clone().detach().float().to("cpu")
+#     latent_refined.requires_grad_(True)
+    
+#     optimizer = torch.optim.Adam([latent_refined], lr=lr)
+    
+#     def total_variation_loss(img):
+#         return torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])) + \
+#                torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]))
+    
+#     for step in range(num_steps):
+#         optimizer.zero_grad()
+#         current_gram = compute_gram_matrix(latent_refined)
+#         style_loss = torch.nn.functional.mse_loss(current_gram, target_gram.to("cpu"))
+        
+#         decoded = vae_cpu.decode(latent_refined)
+#         # If decoded output is not a tensor, try to extract from .sample or dict.
+#         if not isinstance(decoded, torch.Tensor):
+#             if hasattr(decoded, "sample"):
+#                 decoded = decoded.sample
+#             elif isinstance(decoded, dict) and "sample" in decoded:
+#                 decoded = decoded["sample"]
+#         current_features = extract_features(decoded)  # Extracted on CPU.
+#         content_loss = torch.nn.functional.mse_loss(current_features, target_content.to("cpu"))
+        
+#         tv_loss = total_variation_loss(latent_refined)
+#         loss = style_loss + content_weight * content_loss + tv_weight * tv_loss
+#         loss.backward()
+#         optimizer.step()
+    
+#     refined = latent_refined.detach().to(original_device)
+#     # Restore the original VAE on the original device.
+#     # (We don't modify the global model.unet or other parts.)
+#     vae_cpu.to(original_device)
+#     return refined
+
+def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
+                            num_steps=50, lr=0.01, tv_weight=0.001, content_weight=0.1):
+    """
+    Refine the latent representation to better match the target style and content.
+    Only the CLIP feature extraction is offloaded to CPU; the rest runs on GPU in FP16.
     
     Args:
-        latent: The initial blended latent tensor, shape (1, C, H, W), on the original device.
+        latent: The initial blended latent tensor, shape (1, C, H, W) on GPU.
         target_gram: The target Gram matrix for style.
         target_content: The target content features.
-        extract_features: A function that extracts content features from a decoded image.
+        extract_features: Function to extract content features from a decoded image.
         model: The StableDiffusionXLPipeline model.
         num_steps: Number of optimization steps.
         lr: Learning rate.
-        tv_weight: Weight for TV loss.
+        tv_weight: Weight for total variation loss.
         content_weight: Weight for content loss.
     
     Returns:
-        The refined latent representation on the original device.
+        The refined latent representation (on the original GPU device).
     """
-    # Store the original device (likely cuda:0).
-    original_device = model.vae.device
-    # Create a temporary copy of the VAE on CPU for the refinement.
-    vae_cpu = model.vae.to("cpu")
-    
-    # Move the latent to CPU for refinement.
-    latent_refined = latent.clone().detach().float().to("cpu")
+    latent_refined = latent.clone().detach().float()
     latent_refined.requires_grad_(True)
     
     optimizer = torch.optim.Adam([latent_refined], lr=lr)
+    scaler = torch.cuda.amp.GradScaler()
     
     def total_variation_loss(img):
         return torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])) + \
                torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]))
     
+    # Keep the model on GPU.
+    model.vae.to(latent.device)
+    
     for step in range(num_steps):
         optimizer.zero_grad()
-        current_gram = compute_gram_matrix(latent_refined)
-        style_loss = torch.nn.functional.mse_loss(current_gram, target_gram.to("cpu"))
+        with torch.cuda.amp.autocast():
+            current_gram = compute_gram_matrix(latent_refined)
+            style_loss = torch.nn.functional.mse_loss(current_gram, target_gram.to(latent_refined.device))
+            
+            decoded = model.vae.decode(latent_refined)
+            # If decoded is not a tensor, extract from .sample or dict.
+            if not isinstance(decoded, torch.Tensor):
+                if hasattr(decoded, "sample"):
+                    decoded = decoded.sample
+                elif isinstance(decoded, dict) and "sample" in decoded:
+                    decoded = decoded["sample"]
+            # Offload CLIP extraction to CPU.
+            decoded_cpu = decoded.detach().to("cpu")
+            current_features = extract_features(decoded_cpu)  # features on CPU
+            current_features = current_features.to(latent_refined.device)  # move back to GPU for loss
+            content_loss = torch.nn.functional.mse_loss(current_features, target_content.to(latent_refined.device))
+            
+            tv_loss = total_variation_loss(latent_refined)
+            loss = style_loss + content_weight * content_loss + tv_weight * tv_loss
         
-        decoded = vae_cpu.decode(latent_refined)
-        # If decoded output is not a tensor, try to extract from .sample or dict.
-        if not isinstance(decoded, torch.Tensor):
-            if hasattr(decoded, "sample"):
-                decoded = decoded.sample
-            elif isinstance(decoded, dict) and "sample" in decoded:
-                decoded = decoded["sample"]
-        current_features = extract_features(decoded)  # Extracted on CPU.
-        content_loss = torch.nn.functional.mse_loss(current_features, target_content.to("cpu"))
-        
-        tv_loss = total_variation_loss(latent_refined)
-        loss = style_loss + content_weight * content_loss + tv_weight * tv_loss
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        if step % 10 == 0:
+            torch.cuda.empty_cache()
     
-    refined = latent_refined.detach().to(original_device)
-    # Restore the original VAE on the original device.
-    # (We don't modify the global model.unet or other parts.)
-    vae_cpu.to(original_device)
-    return refined
+    return latent_refined.detach()
 
 
 # -----------------------------------------------------------------------------
