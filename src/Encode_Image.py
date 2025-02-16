@@ -761,7 +761,7 @@ def extract_features(decoded_image):
 #     return refined
 
 def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
-                            num_steps=50, lr=0.01, tv_weight=0.001, content_weight=0.1):
+                            num_steps=30, lr=0.01, tv_weight=0.001, content_weight=0.1):
     """
     Refine the latent representation to better match the target style and content,
     by downsampling the decoded image for CLIP feature extraction.
