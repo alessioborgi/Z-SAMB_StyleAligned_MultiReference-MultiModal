@@ -760,15 +760,18 @@ def extract_features(decoded_image):
 #     vae_cpu.to(original_device)
 #     return refined
 
+from torch.utils.checkpoint import checkpoint
+
 def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
-                            num_steps=30, lr=0.01, tv_weight=0.001, content_weight=0.1):
+                            num_steps=20, lr=0.01, tv_weight=0.001, content_weight=0.1):
     """
     Refine the latent representation to better match the target style and content,
-    by downsampling the decoded image for CLIP feature extraction.
+    using mixed precision on GPU and checkpointing the VAE decoder to reduce memory usage.
     
-    This version runs entirely on GPU using mixed precision (AMP), but explicitly
-    downsamples the decoded image to 224x224 before passing it to the feature extractor,
-    which greatly reduces memory usage for the CLIP operations.
+    The loss is a weighted sum of:
+      - Style loss (MSE between the latent's Gram matrix and target Gram matrix)
+      - Content loss (MSE between extracted features of the decoded latent and target content features)
+      - Total Variation (TV) loss for spatial smoothness.
     
     Args:
         latent: The initial blended latent tensor, shape (1, C, H, W) on GPU.
@@ -778,7 +781,7 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
         model: The StableDiffusionXLPipeline model.
         num_steps: Number of optimization steps.
         lr: Learning rate.
-        tv_weight: Weight for total variation loss.
+        tv_weight: Weight for TV loss.
         content_weight: Weight for content loss.
     
     Returns:
@@ -800,17 +803,21 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
             current_gram = compute_gram_matrix(latent_refined)
             style_loss = torch.nn.functional.mse_loss(current_gram, target_gram.to(latent_refined.device))
             
-            # Decode the latent image.
-            decoded = model.vae.decode(latent_refined)
+            # Use checkpointing to wrap the VAE decoder.
+            decoded = checkpoint(lambda x: model.vae.decode(x), latent_refined)
             if not isinstance(decoded, torch.Tensor):
                 if hasattr(decoded, "sample"):
                     decoded = decoded.sample
                 elif isinstance(decoded, dict) and "sample" in decoded:
                     decoded = decoded["sample"]
+            
             # Downsample the decoded image to 224x224 for feature extraction.
             decoded_down = torch.nn.functional.interpolate(decoded, size=(224, 224),
                                                              mode='bilinear', align_corners=False)
-            current_features = extract_features(decoded_down)
+            # Offload the heavy CLIP extraction to CPU.
+            decoded_cpu = decoded_down.detach().to("cpu")
+            current_features = extract_features(decoded_cpu)
+            current_features = current_features.to(latent_refined.device)
             content_loss = torch.nn.functional.mse_loss(current_features, target_content.to(latent_refined.device))
             
             tv_loss = total_variation_loss(latent_refined)
