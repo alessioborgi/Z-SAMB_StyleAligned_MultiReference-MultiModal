@@ -763,8 +763,12 @@ def extract_features(decoded_image):
 def style_refine_advanced(latent, target_gram, target_content, extract_features, model, 
                             num_steps=50, lr=0.01, tv_weight=0.001, content_weight=0.1):
     """
-    Refine the latent representation to better match the target style and content.
-    Only the CLIP feature extraction is offloaded to CPU; the rest runs on GPU in FP16.
+    Refine the latent representation to better match the target style and content,
+    by downsampling the decoded image for CLIP feature extraction.
+    
+    This version runs entirely on GPU using mixed precision (AMP), but explicitly
+    downsamples the decoded image to 224x224 before passing it to the feature extractor,
+    which greatly reduces memory usage for the CLIP operations.
     
     Args:
         latent: The initial blended latent tensor, shape (1, C, H, W) on GPU.
@@ -790,26 +794,23 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
         return torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :])) + \
                torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]))
     
-    # Keep the model on GPU.
-    model.vae.to(latent.device)
-    
     for step in range(num_steps):
         optimizer.zero_grad()
         with torch.cuda.amp.autocast():
             current_gram = compute_gram_matrix(latent_refined)
             style_loss = torch.nn.functional.mse_loss(current_gram, target_gram.to(latent_refined.device))
             
+            # Decode the latent image.
             decoded = model.vae.decode(latent_refined)
-            # If decoded is not a tensor, extract from .sample or dict.
             if not isinstance(decoded, torch.Tensor):
                 if hasattr(decoded, "sample"):
                     decoded = decoded.sample
                 elif isinstance(decoded, dict) and "sample" in decoded:
                     decoded = decoded["sample"]
-            # Offload CLIP extraction to CPU.
-            decoded_cpu = decoded.detach().to("cpu")
-            current_features = extract_features(decoded_cpu)  # features on CPU
-            current_features = current_features.to(latent_refined.device)  # move back to GPU for loss
+            # Downsample the decoded image to 224x224 for feature extraction.
+            decoded_down = torch.nn.functional.interpolate(decoded, size=(224, 224),
+                                                             mode='bilinear', align_corners=False)
+            current_features = extract_features(decoded_down)
             content_loss = torch.nn.functional.mse_loss(current_features, target_content.to(latent_refined.device))
             
             tv_loss = total_variation_loss(latent_refined)
@@ -818,10 +819,11 @@ def style_refine_advanced(latent, target_gram, target_content, extract_features,
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        if step % 10 == 0:
+        if step % 5 == 0:
             torch.cuda.empty_cache()
     
     return latent_refined.detach()
+
 
 
 # -----------------------------------------------------------------------------
