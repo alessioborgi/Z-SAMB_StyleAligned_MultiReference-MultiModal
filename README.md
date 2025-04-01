@@ -3,7 +3,6 @@
 # Z-SAMB: Zero-Shot Style-Aligned Multi-Reference Blending with Multi-Modal Content Fusion
 
 ### Copyright © 2024 Alessio Borgi, Luca Maiano, Irene Amerini
-### Paper: ...LOADING...
 
 ### **Abstract**
 We introduce Z-SAMB, a Zero-Shot Style-Aligned Conditioned Image Generation pipeline that addresses the limitations in current multi-style blending and evaluation methods and challenges in multi-modal content fusion. Existing approaches often struggle with seamlessly integrating multiple reference styles and lack robust metrics for assessing style consistency across generated images. Additionally, effectively fusing diverse content modalities remains a significant challenge. Our framework integrates Multi-Reference Style Alignment, enabling smooth blending of multiple reference styles through latent space manipulation without fine-tuning, ensuring high-fidelity style transitions and alignment in generated images. We introduce two techniques: Linear Weighted Blending and Spherical Linear Interpolation (SLERP), comprehensively comparing their effectiveness. We propose a new metric, Weighted Multi-Style DINO VIT-B/8, to evaluate multi-style consistency designed for scenarios involving multiple reference styles. Furthermore, our framework incorporates Multi-Modal Content Fusion, allowing the diffusion text encoder to leverage diverse content sources processed through a dedicated pipeline.
